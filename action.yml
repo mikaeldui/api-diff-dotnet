@@ -1,0 +1,22 @@
+name: '.NET API Diff' 
+description: 'Compares the public API differences between .NET assemblies or NuGet packages.'
+author: 'Mikael Dúi Bolinder'
+branding:
+  icon: 'minus'  
+  color: 'blue'
+inputs:
+  paths:
+    description: 'The path(s) to files to compare. If it's a single .nupkg, it'll be compared against the latest version on NuGet.org.'
+    required: true
+    type: string
+outputs:
+  is-different:
+    description: "'true' if there's a difference, otherwise 'false'."
+    value: ${{ steps.diff.outputs.is-different }}
+  # TODO: fail-if-same
+
+runs:
+  using: "composite"
+  steps:  
+    - name: Check diff
+      run: 'dotnet run $env:GITHUB_ACTION_PATH/ApiDiff/ApiDiff.csproj'

@@ -1,0 +1,206 @@
+﻿using ListDiff;
+using Mono.Cecil;
+
+namespace ApiDiff.Data;
+
+public class ApiDiff
+{
+    public ApiDiff(PackageData package, PackageTargetFramework framework, PackageData otherPackage,
+        PackageTargetFramework otherFramework)
+    {
+        Package = package;
+        Framework = framework;
+        OtherPackage = otherPackage;
+        OtherFramework = otherFramework;
+
+        if (otherFramework == null)
+        {
+            Error =
+                $"Could not find framework matching \"{framework?.Moniker}\" in {otherPackage?.Id} {otherPackage?.Version}.";
+            return;
+        }
+
+        var asmDiff = OtherFramework.PublicAssemblies.Diff(Framework.PublicAssemblies,
+            (x, y) => x.Definition.Name.Name == y.Definition.Name.Name);
+
+        var types = new List<TypeDiffInfo>();
+        foreach (var aa in asmDiff.Actions)
+        {
+            IEnumerable<Tuple<TypeDefinition, PackageTargetFramework>> srcTypes;
+            IEnumerable<Tuple<TypeDefinition, PackageTargetFramework>> destTypes;
+            switch (aa.ActionType)
+            {
+                case ListDiffActionType.Add:
+                    srcTypes = Enumerable.Empty<Tuple<TypeDefinition, PackageTargetFramework>>();
+                    destTypes = aa.DestinationItem.PublicTypes.Select(x => Tuple.Create(x, Framework));
+                    break;
+                case ListDiffActionType.Remove:
+                    srcTypes = aa.SourceItem.PublicTypes.Select(x => Tuple.Create(x, OtherFramework));
+                    destTypes = Enumerable.Empty<Tuple<TypeDefinition, PackageTargetFramework>>();
+                    break;
+                default:
+                    srcTypes = aa.SourceItem.PublicTypes.Select(x => Tuple.Create(x, OtherFramework));
+                    destTypes = aa.DestinationItem.PublicTypes.Select(x => Tuple.Create(x, Framework));
+                    break;
+            }
+
+            if (aa.ActionType == ListDiffActionType.Remove)
+                continue;
+            var typeDiff = srcTypes.Diff(destTypes, (x, y) => x.Item1.FullName == y.Item1.FullName);
+            foreach (var ta in typeDiff.Actions)
+            {
+                var ti = new TypeDiffInfo {Action = ta.ActionType};
+
+                IEnumerable<IMemberDefinition> srcMembers;
+                IEnumerable<IMemberDefinition> destMembers;
+                switch (ta.ActionType)
+                {
+                    case ListDiffActionType.Add:
+                        ti.Type = ta.DestinationItem.Item1;
+                        ti.Framework = ta.DestinationItem.Item2;
+                        srcMembers = Enumerable.Empty<IMemberDefinition>();
+                        destMembers = ti.Type.GetPublicMembers();
+                        break;
+                    case ListDiffActionType.Remove:
+                        ti.Type = ta.SourceItem.Item1;
+                        ti.Framework = ta.SourceItem.Item2;
+                        srcMembers = ti.Type.GetPublicMembers();
+                        destMembers = Enumerable.Empty<IMemberDefinition>();
+                        break;
+                    default:
+                        ti.Type = ta.DestinationItem.Item1;
+                        ti.Framework = ta.DestinationItem.Item2;
+                        srcMembers = ta.SourceItem.Item1.GetPublicMembers();
+                        destMembers = ta.DestinationItem.Item1.GetPublicMembers();
+                        break;
+                }
+
+                if (ta.ActionType == ListDiffActionType.Remove)
+                {
+                    types.Add(ti);
+                    continue;
+                }
+
+                var memDiff = srcMembers.Diff(destMembers, (x, y) => x.FullName == y.FullName);
+                foreach (var ma in memDiff.Actions)
+                {
+                    var mi = new MemberDiffInfo {Action = ma.ActionType};
+                    switch (ma.ActionType)
+                    {
+                        case ListDiffActionType.Add:
+                            mi.Member = ma.DestinationItem;
+                            ti.Members.Add(mi);
+                            break;
+                        case ListDiffActionType.Remove:
+                            mi.Member = ma.SourceItem;
+                            ti.Members.Add(mi);
+                            break;
+                        default:
+                            mi.Member = ma.DestinationItem;
+                            break;
+                    }
+                }
+
+                if (ta.ActionType == ListDiffActionType.Add || ti.Members.Count > 0)
+                    types.Add(ti);
+            }
+        }
+
+        foreach (var ns in types.GroupBy(x => x.Type.Namespace))
+        {
+            var ni = new NamespaceDiffInfo {Action = ListDiffActionType.Update};
+            ni.Namespace = ns.Key;
+            ni.Types.AddRange(ns);
+            Namespaces.Add(ni);
+        }
+
+        Namespaces.Sort((x, y) => string.Compare(x.Namespace, y.Namespace, StringComparison.Ordinal));
+    }
+
+    public PackageData Package { get; }
+    public PackageTargetFramework Framework { get; }
+    public PackageData OtherPackage { get; }
+    public PackageTargetFramework OtherFramework { get; }
+    public string Error { get; } = "";
+
+    public List<NamespaceDiffInfo> Namespaces { get; } = new();
+
+    public static async Task<ApiDiff> GetAsync(
+        object inputId,
+        object inputVersion,
+        object inputFramework,
+        object inputOtherVersion,
+        HttpClient httpClient,
+        CancellationToken token)
+    {
+        var versions = await PackageVersions.GetAsync(inputId, httpClient, token).ConfigureAwait(false);
+        var version = versions.GetVersion(inputVersion);
+        var otherVersion = versions.GetVersion(inputOtherVersion);
+        inputFramework = (inputFramework ?? "").ToString().ToLowerInvariant().Trim();
+
+        var packageId = versions.LowerId;
+
+        var package = await PackageData.GetAsync(packageId, version.ShortVersionString, httpClient, token)
+            .ConfigureAwait(false);
+        var otherPackage = await PackageData.GetAsync(packageId, otherVersion, httpClient, token).ConfigureAwait(false);
+
+        var framework = package.FindClosestTargetFramework(inputFramework);
+        var otherFramework = otherPackage.FindClosestTargetFramework(inputFramework);
+
+        return await Task.Run(() => new ApiDiff(package, framework, otherPackage, otherFramework))
+            .ConfigureAwait(false);
+    }
+
+    public class DiffInfo
+    {
+        public ListDiffActionType Action;
+    }
+
+    public class NamespaceDiffInfo : DiffInfo
+    {
+        public string Namespace;
+        public List<TypeDiffInfo> Types = new();
+        public int NumAdditions => Types.Sum(x => x.NumAdditions);
+        public int NumRemovals => Types.Sum(x => x.NumRemovals);
+    }
+
+    public class TypeDiffInfo : DiffInfo
+    {
+        public PackageTargetFramework Framework;
+        public List<MemberDiffInfo> Members = new();
+        public TypeDefinition Type;
+
+        public int NumAdditions
+        {
+            get
+            {
+                switch (Action)
+                {
+                    case ListDiffActionType.Remove: return 0;
+                    case ListDiffActionType.Update: return Members.Sum(x => x.NumAdditions);
+                    default: return 1 + Members.Sum(x => x.NumAdditions);
+                }
+            }
+        }
+
+        public int NumRemovals
+        {
+            get
+            {
+                switch (Action)
+                {
+                    case ListDiffActionType.Remove: return 1;
+                    case ListDiffActionType.Update: return Members.Sum(x => x.NumRemovals);
+                    default: return 0;
+                }
+            }
+        }
+    }
+
+    public class MemberDiffInfo : DiffInfo
+    {
+        public IMemberDefinition Member;
+        public int NumAdditions => Action == ListDiffActionType.Add ? 1 : 0;
+        public int NumRemovals => Action == ListDiffActionType.Remove ? 1 : 0;
+    }
+}

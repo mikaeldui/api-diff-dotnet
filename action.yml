@@ -6,7 +6,7 @@ branding:
   color: 'blue'
 inputs:
   paths:
-    description: 'The path(s) to files to compare. If it's a single .nupkg, it'll be compared against the latest version on NuGet.org.'
+    description: "The path(s) to files to compare. If it's a single .nupkg, it'll be compared against the latest version on NuGet.org."
     required: true
     type: string
 outputs:
